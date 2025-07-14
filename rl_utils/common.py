@@ -10,6 +10,17 @@ import functools
 # Common utilities
 ###############################
 
+def compute_batched(f, xs):
+    return f(torch.cat(xs, dim=0)).split([len(x) for x in xs])
+
+def update_exponential_moving_average(target, source, alpha):
+    """Update target network parameters using exponential moving average"""
+    with torch.no_grad():
+        for target_param, source_param in zip(target.parameters(), source.parameters()):
+            target_param.data.mul_(1. - alpha).add_(source_param.data, alpha=alpha)
+    return target
+
+
 def shard_batch(batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
     """
     Split batch across devices for data parallelism. Analogous to JAX shard_batch.
@@ -19,14 +30,14 @@ def shard_batch(batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
     return batch  # Placeholder implementation
 
 
-def target_update(model: 'TrainState', 
-                  target_model: 'TrainState', 
-                  tau: float) -> 'TrainState':
-    """Update target network parameters using exponential moving average"""
-    with torch.no_grad():
-        for param, target_param in zip(model.model.parameters(), target_model.model.parameters()):
-            target_param.data.copy_(tau * param.data + (1 - tau) * target_param.data)
-    return target_model
+# def target_update(model: TrainState, 
+#                   target_model: TrainState, 
+#                   tau: float) -> TrainState:
+#     """Update target network parameters using exponential moving average"""
+#     with torch.no_grad():
+#         for param, target_param in zip(model.model.parameters(), target_model.model.parameters()):
+#             target_param.data.copy_(tau * param.data + (1 - tau) * target_param.data)
+#     return target_model
 
 ###############################
 # TrainState Implementation

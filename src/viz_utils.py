@@ -35,8 +35,8 @@ def make_visual(images, metrics, visualization_methods=[]):
 
     plt.tight_layout()
     canvas.draw() 
-    out_image = np.frombuffer(canvas.tostring_rgb(), dtype='uint8')
-    out_image = out_image.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+    out_image = np.frombuffer(canvas.buffer_rgba(), dtype='uint8')
+    out_image = out_image.reshape(fig.canvas.get_width_height()[::-1] + (4,))[:, :, :3]
     return out_image
 
 def make_visual_no_image(metrics, visualization_methods=[]):
@@ -54,8 +54,8 @@ def make_visual_no_image(metrics, visualization_methods=[]):
 
     plt.tight_layout()
     canvas.draw() 
-    out_image = np.frombuffer(canvas.tostring_rgb(), dtype='uint8')
-    out_image = out_image.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+    out_image = np.frombuffer(canvas.buffer_rgba(), dtype='uint8')
+    out_image = out_image.reshape(fig.canvas.get_width_height()[::-1] + (4,))[:, :, :3]
     return out_image
 
 

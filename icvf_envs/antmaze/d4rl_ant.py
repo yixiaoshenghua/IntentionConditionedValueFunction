@@ -18,8 +18,8 @@ import matplotlib.gridspec as gridspec
 
 def get_canvas_image(canvas):
     canvas.draw() 
-    out_image = np.frombuffer(canvas.tostring_rgb(), dtype='uint8')
-    out_image = out_image.reshape(canvas.get_width_height()[::-1] + (3,))
+    out_image = np.frombuffer(canvas.buffer_rgba(), dtype='uint8')
+    out_image = out_image.reshape(canvas.get_width_height()[::-1] + (4,))[:, :, :3]
     return out_image
 
 def valid_goal_sampler(self, np_random):
@@ -167,7 +167,7 @@ def plot_value(env, dataset, value_fn, fig, ax, N=20, random=False, title=None):
     x, y = observations[:, 0], observations[:, 1]
     x = x.reshape(N, N)
     y = y.reshape(N, N)
-    values = values.reshape(N, N)
+    values = values.detach().cpu().numpy().reshape(N, N)
     mesh = ax.pcolormesh(x, y, values, cmap='viridis')
     env.draw(ax)
 

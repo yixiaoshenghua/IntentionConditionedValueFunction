@@ -196,11 +196,12 @@ class ICVFAgent(nn.Module):
                 )
         
         self.step += 1
-        return self.state_dict(), metrics
+        return metrics
 
 def create_learner(
     seed: int,
     value_net: nn.Module,
+    target_value_net: nn.Module,
     optim_kwargs: Dict[str, Any] = {
         'lr': 0.00005,
         'eps': 0.0003125
@@ -235,7 +236,6 @@ def create_learner(
     optimizer = optim.Adam(value_net.parameters(), **optim_kwargs)
     
     # Create target network
-    target_value_net = type(value_net)()
     target_value_net.load_state_dict(value_net.state_dict())
     target_value_net.eval()
     

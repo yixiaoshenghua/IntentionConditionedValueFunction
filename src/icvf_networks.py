@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from typing import Callable, Dict, Optional, Sequence, Tuple, Union
 
-class LayerNormMLP(nn.Module):
+class MLP(nn.Module):
     """
     Multi-layer perceptron with Layer Normalization.
     
@@ -13,17 +13,22 @@ class LayerNormMLP(nn.Module):
         kernel_init: Weight initialization method
     """
     def __init__(self, 
+                 input_dim: int,
                  hidden_dims: Sequence[int],
                  activations: Callable[[torch.Tensor], torch.Tensor] = nn.GELU(),
                  activate_final: bool = False,
-                 kernel_init: Optional[Callable] = None):
+                 kernel_init: Optional[Callable] = None,
+                 use_layer_norm: bool = True):
         super().__init__()
         layers = []
+        prev_dim = input_dim
         for i, dim in enumerate(hidden_dims):
-            layers.append(nn.LazyLinear(dim))
+            layers.append(nn.Linear(prev_dim, dim))
+            prev_dim = dim
             if i < len(hidden_dims) - 1 or activate_final:
                 layers.append(activations)
-                layers.append(nn.LayerNorm(dim))
+                if use_layer_norm:
+                    layers.append(nn.LayerNorm(dim))
         self.net = nn.Sequential(*layers)
         
         # Apply custom initialization if provided
@@ -110,11 +115,11 @@ class MonolithicVF(ICVFTemplate):
         use_layer_norm: Whether to use layer normalization
     """
     def __init__(self,
+                 input_dim: int,
                  hidden_dims: Sequence[int],
                  use_layer_norm: bool = False):
         super().__init__()
-        network_cls = LayerNormMLP if use_layer_norm else nn.LazyLinear
-        self.net = network_cls(hidden_dims + [1])
+        self.net = MLP(input_dim, hidden_dims + [1], use_layer_norm=use_layer_norm)
         self.repr_warning = True
 
     def get_info(self, 
@@ -148,32 +153,22 @@ class MultilinearVF(ICVFTemplate):
         use_layer_norm: Whether to use layer normalization
     """
     def __init__(self,
+                 input_dim: int,
                  hidden_dims: Sequence[int],
                  use_layer_norm: bool = False):
         super().__init__()
-        network_cls = LayerNormMLP if use_layer_norm else nn.Sequential
+        network_cls = MLP
         
         # State representation network
-        self.phi_net = network_cls(
-            nn.LazyLinear(hidden_dims[-1]),
-            nn.GELU() if use_layer_norm else None
-        )
-        
+        self.phi_net = network_cls(input_dim, hidden_dims, use_layer_norm=use_layer_norm)
         # Outcome representation network
-        self.psi_net = network_cls(
-            nn.LazyLinear(hidden_dims[-1]),
-            nn.GELU() if use_layer_norm else None
-        )
-        
+        self.psi_net = network_cls(input_dim, hidden_dims, use_layer_norm=use_layer_norm)
         # Intent transformation network
-        self.T_net = network_cls(
-            nn.LazyLinear(hidden_dims[-1]),
-            nn.GELU() if use_layer_norm else None
-        )
+        self.T_net = network_cls(hidden_dims[0], hidden_dims[1:], use_layer_norm=use_layer_norm)
         
         # Intent-conditioned projection matrices
-        self.matrix_a = nn.LazyLinear(hidden_dims[-1])
-        self.matrix_b = nn.LazyLinear(hidden_dims[-1])
+        self.matrix_a = nn.Linear(hidden_dims[0], hidden_dims[-1])
+        self.matrix_b = nn.Linear(hidden_dims[0], hidden_dims[-1])
 
     def get_phi(self, observations: torch.Tensor) -> torch.Tensor:
         return self.phi_net(observations)

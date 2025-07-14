@@ -23,8 +23,8 @@ GOAL = 12
 
 def get_canvas_image(canvas):
     canvas.draw() 
-    out_image = np.frombuffer(canvas.tostring_rgb(), dtype='uint8')
-    out_image = out_image.reshape(canvas.get_width_height()[::-1] + (3,))
+    out_image = np.frombuffer(canvas.buffer_rgba(), dtype='uint8')
+    out_image = out_image.reshape(canvas.get_width_height()[::-1] + (4,))[:, :, :3]
     return out_image
 
 def get_inner_env(env):

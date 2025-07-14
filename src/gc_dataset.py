@@ -1,19 +1,48 @@
 import torch
 import dataclasses
 from typing import Any, Dict, Optional
-
+import numpy as np
+from rl_utils.dataset import tree_map
 @dataclasses.dataclass
 class GCDataset:
-    dataset: Dict[str, torch.Tensor]  # Dataset as dictionary of tensors
-    p_randomgoal: float              # Probability to sample random goal
-    p_trajgoal: float               # Probability to sample future trajectory goal
-    p_currgoal: float               # Probability to use current state as goal
-    terminal_key: str = 'dones_float'  # Key for termination flags
-    reward_scale: float = 1.0       # Reward scaling factor
-    reward_shift: float = -1.0      # Reward shift factor
-    terminal: bool = True           # Whether to terminate on success
-    max_distance: Optional[int] = None  # Max steps away for trajectory goals
-    curr_goal_shift: int = 0        # Index offset for current goal
+    def __init__(self,
+                dataset: Dict[str, torch.Tensor],  # Dataset as dictionary of tensors
+                p_randomgoal: float,               # Probability to sample random goal
+                p_trajgoal: float,               # Probability to sample future trajectory goal
+                p_currgoal: float,               # Probability to use current state as goal
+                terminal_key: str = 'dones_float',  # Key for termination flags
+                reward_scale: float = 1.0,       # Reward scaling factor
+                reward_shift: float = -1.0,      # Reward shift factor
+                terminal: bool = True,           # Whether to terminate on success
+                max_distance: Optional[int] = None,  # Max steps away for trajectory goals
+                curr_goal_shift: int = 0,        # Index offset for current goal
+                 ):
+        """        Initialize the GCDataset with dataset and goal sampling parameters. """
+        self.dataset = dataset
+        self.p_randomgoal = p_randomgoal
+        self.p_trajgoal = p_trajgoal
+        self.p_currgoal = p_currgoal
+        self.terminal_key = terminal_key
+        self.reward_scale = reward_scale
+        self.reward_shift = reward_shift
+        self.terminal = terminal
+        self.max_distance = max_distance
+        self.curr_goal_shift = curr_goal_shift
+
+        self.__post_init__()
+    
+    @staticmethod
+    def get_default_config():
+        return {
+            'p_randomgoal': 0.3,
+            'p_trajgoal': 0.5,
+            'p_currgoal': 0.2,
+            'reward_scale': 1.0,
+            'reward_shift': -1.0,
+            'terminal': True,
+            'max_distance': None,
+            'curr_goal_shift': 0,
+        }
 
     def __post_init__(self):
         """Identify terminal state indices and validate probability weights."""
@@ -23,7 +52,7 @@ class GCDataset:
         ).squeeze()
         
         # Validate probability distribution
-        assert (self.p_randomgoal + self.p_trajgoal + self.p_currgoal - 1.0).abs() < 1e-6, \
+        assert np.abs(self.p_randomgoal + self.p_trajgoal + self.p_currgoal - 1.0) < 1e-6, \
             "Goal sampling probabilities must sum to 1"
 
     def sample_goals(self, indx: torch.Tensor, 
@@ -110,16 +139,45 @@ class GCDataset:
         )
         
         # Add goals to batch (assumes observations is a tensor dict)
-        batch['goals'] = {
-            k: v[goal_indx] for k, v in self.dataset['observations'].items()
-        }
+        batch['goals'] = tree_map(lambda arr: arr[goal_indx], self.dataset['observations'])
         
         return batch
 
 @dataclasses.dataclass
 class GCSDataset(GCDataset):
-    p_samegoal: float = 0.5          # Probability to share goals between streams
-    intent_sametraj: bool = False   # Whether to force intent goals in same trajectory
+    def __init__(self,
+                 dataset: Dict[str, torch.Tensor],  # Dataset as dictionary of tensors
+                 p_randomgoal: float,               # Probability to sample random goal
+                 p_trajgoal: float,               # Probability to sample future trajectory goal
+                 p_currgoal: float,               # Probability to use current state as goal
+                 terminal_key: str = 'dones_float',  # Key for termination flags
+                 reward_scale: float = 1.0,       # Reward scaling factor
+                 reward_shift: float = -1.0,      # Reward shift factor
+                 terminal: bool = True,           # Whether to terminate on success
+                 max_distance: Optional[int] = None,  # Max steps away for trajectory goals
+                 curr_goal_shift: int = 0,        # Index offset for current goal
+                 p_samegoal: float = 0.5,          # Probability to share goals between streams
+                 intent_sametraj: bool = False   # Whether to force intent goals in same trajectory
+                 ):
+        super().__init__(dataset, p_randomgoal, p_trajgoal, p_currgoal, terminal_key, reward_scale, reward_shift, terminal, max_distance, curr_goal_shift)
+        self.p_samegoal = p_samegoal
+        self.intent_sametraj = intent_sametraj
+
+    @staticmethod
+    def get_default_config():
+        return {
+            'p_randomgoal': 0.3,
+            'p_trajgoal': 0.5,
+            'p_currgoal': 0.2,
+            'reward_scale': 1.0,
+            'reward_shift': -1.0,
+            'terminal': True,
+            'p_samegoal': 0.5,
+            'intent_sametraj': False,
+            'max_distance': None,
+            'curr_goal_shift': 0,
+        }
+    
 
     def sample(self, batch_size: int, 
               indx: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
@@ -174,11 +232,7 @@ class GCSDataset(GCDataset):
         )
         
         # Add both goal types to batch
-        batch['goals'] = {
-            k: v[goal_indx] for k, v in self.dataset['observations'].items()
-        }
-        batch['desired_goals'] = {
-            k: v[desired_goal_indx] for k, v in self.dataset['observations'].items()
-        }
+        batch['goals'] = tree_map(lambda arr: arr[goal_indx], self.dataset['observations'])
+        batch['desired_goals'] = tree_map(lambda arr: arr[desired_goal_indx], self.dataset['observations'])
         
         return batch
