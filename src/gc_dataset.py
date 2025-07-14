@@ -1,133 +1,184 @@
-from jaxrl_m.dataset import Dataset
+import torch
 import dataclasses
-import numpy as np
-import jax
-import ml_collections
+from typing import Any, Dict, Optional
 
 @dataclasses.dataclass
 class GCDataset:
-    dataset: Dataset
-    p_randomgoal: float
-    p_trajgoal: float
-    p_currgoal: float
-    terminal_key: str = 'dones_float'
-    reward_scale: float = 1.0
-    reward_shift: float = -1.0
-    terminal: bool = True
-    max_distance: int = None
-    curr_goal_shift: int = 0
-
-    @staticmethod
-    def get_default_config():
-        return ml_collections.ConfigDict({
-            'p_randomgoal': 0.3,
-            'p_trajgoal': 0.5,
-            'p_currgoal': 0.2,
-            'reward_scale': 1.0,
-            'reward_shift': -1.0,
-            'terminal': True,
-            'max_distance': ml_collections.config_dict.placeholder(int),
-            'curr_goal_shift': 0,
-        })
+    dataset: Dict[str, torch.Tensor]  # Dataset as dictionary of tensors
+    p_randomgoal: float              # Probability to sample random goal
+    p_trajgoal: float               # Probability to sample future trajectory goal
+    p_currgoal: float               # Probability to use current state as goal
+    terminal_key: str = 'dones_float'  # Key for termination flags
+    reward_scale: float = 1.0       # Reward scaling factor
+    reward_shift: float = -1.0      # Reward shift factor
+    terminal: bool = True           # Whether to terminate on success
+    max_distance: Optional[int] = None  # Max steps away for trajectory goals
+    curr_goal_shift: int = 0        # Index offset for current goal
 
     def __post_init__(self):
-        self.terminal_locs, = np.nonzero(self.dataset[self.terminal_key] > 0)
-        assert np.isclose(self.p_randomgoal + self.p_trajgoal + self.p_currgoal, 1.0)
-
-    def sample_goals(self, indx, p_randomgoal=None, p_trajgoal=None, p_currgoal=None):
-        if p_randomgoal is None:
-            p_randomgoal = self.p_randomgoal
-        if p_trajgoal is None:
-            p_trajgoal = self.p_trajgoal
-        if p_currgoal is None:
-            p_currgoal = self.p_currgoal
-
-        batch_size = len(indx)
-        # Random goals
-        goal_indx = np.random.randint(self.dataset.size-self.curr_goal_shift, size=batch_size)
+        """Identify terminal state indices and validate probability weights."""
+        # Get indices where episode terminates
+        self.terminal_locs = torch.nonzero(
+            self.dataset[self.terminal_key] > 0.5
+        ).squeeze()
         
-        # Goals from the same trajectory
-        final_state_indx = self.terminal_locs[np.searchsorted(self.terminal_locs, indx)]
+        # Validate probability distribution
+        assert (self.p_randomgoal + self.p_trajgoal + self.p_currgoal - 1.0).abs() < 1e-6, \
+            "Goal sampling probabilities must sum to 1"
+
+    def sample_goals(self, indx: torch.Tensor, 
+                    p_randomgoal: Optional[float] = None,
+                    p_trajgoal: Optional[float] = None,
+                    p_currgoal: Optional[float] = None) -> torch.Tensor:
+        """
+        Sample goals using probabilistic strategy:
+        - p_randomgoal: uniformly random goals
+        - p_trajgoal: goals from same trajectory
+        - p_currgoal: current state goals
+        """
+        # Use default probabilities if not specified
+        p_randomgoal = self.p_randomgoal if p_randomgoal is None else p_randomgoal
+        p_trajgoal = self.p_trajgoal if p_trajgoal is None else p_trajgoal
+        p_currgoal = self.p_currgoal if p_currgoal is None else p_currgoal
+        
+        batch_size, device = len(indx), indx.device
+        
+        # 1. Random goals (uniform sampling)
+        goal_indx = torch.randint(
+            0, len(self.dataset['observations']) - self.curr_goal_shift,
+            (batch_size,), device=device
+        )
+        
+        # 2. Trajectory goals (interpolate between current and terminal state)
+        # Find terminal state for each index
+        traj_idx = torch.bucketize(indx, self.terminal_locs)
+        traj_idx = torch.clamp(traj_idx, max=len(self.terminal_locs)-1)
+        final_state_indx = self.terminal_locs[traj_idx]
+        
+        # Apply max distance constraint if specified
         if self.max_distance is not None:
-            final_state_indx = np.clip(final_state_indx, 0, indx + self.max_distance)
-            
-        distance = np.random.rand(batch_size)
-        middle_goal_indx = np.round(((indx) * distance + final_state_indx * (1- distance))).astype(int)
-
-        goal_indx = np.where(np.random.rand(batch_size) < p_trajgoal / (1.0 - p_currgoal), middle_goal_indx, goal_indx)
+            final_state_indx = torch.min(
+                final_state_indx, indx + self.max_distance
+            )
         
-        # Goals at the current state
-        goal_indx = np.where(np.random.rand(batch_size) < p_currgoal, indx, goal_indx)
+        # Interpolate intermediate goal
+        distance = torch.rand(batch_size, device=device)
+        middle_goal_indx = torch.round(
+            indx.float() * (1 - distance) + final_state_indx.float() * distance
+        ).long()
+        
+        # Select between trajectory and random goals
+        traj_mask = torch.rand(batch_size, device=device) < (
+            p_trajgoal / (p_trajgoal + p_randomgoal + 1e-8)
+        )
+        goal_indx = torch.where(traj_mask, middle_goal_indx, goal_indx)
+        
+        # 3. Current state goals
+        curr_mask = torch.rand(batch_size, device=device) < p_currgoal
+        goal_indx = torch.where(curr_mask, indx, goal_indx)
+        
         return goal_indx
 
-    def sample(self, batch_size: int, indx=None):
+    def sample(self, batch_size: int, 
+              indx: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+        """
+        Sample batch of transitions with goal relabeling.
+        Returns dictionary containing observations, goals, rewards, etc.
+        """
+        # Sample transition indices if not provided
         if indx is None:
-            indx = np.random.randint(self.dataset.size-1, size=batch_size)
+            indx = torch.randint(
+                0, len(self.dataset['observations']) - 1,
+                (batch_size,), device='cpu'
+            ).to(self.dataset['observations'].device)
         
-        batch = self.dataset.sample(batch_size, indx)
+        # Get basic transitions
+        batch = {k: v[indx] for k, v in self.dataset.items()}
+        
+        # Sample goals and calculate success
         goal_indx = self.sample_goals(indx)
-
-        success = (indx == goal_indx)
-        batch['rewards'] = success.astype(float) * self.reward_scale + self.reward_shift
-        if self.terminal:
-            batch['masks'] = (1.0 - success.astype(float))
-        else:
-            batch['masks'] = np.ones(batch_size)
-        batch['goals'] = jax.tree_map(lambda arr: arr[goal_indx+self.curr_goal_shift], self.dataset['observations'])
-
+        success = (indx == goal_indx).float()
+        
+        # Compute rewards and termination masks
+        batch['rewards'] = success * self.reward_scale + self.reward_shift
+        batch['masks'] = 1.0 - success if self.terminal else torch.ones_like(success)
+        
+        # Adjust goal indices with shift and bounds
+        goal_indx = torch.clamp(
+            goal_indx + self.curr_goal_shift,
+            0, len(self.dataset['observations']) - 1
+        )
+        
+        # Add goals to batch (assumes observations is a tensor dict)
+        batch['goals'] = {
+            k: v[goal_indx] for k, v in self.dataset['observations'].items()
+        }
+        
         return batch
 
 @dataclasses.dataclass
 class GCSDataset(GCDataset):
-    p_samegoal: float = 0.5
-    intent_sametraj: bool = False
+    p_samegoal: float = 0.5          # Probability to share goals between streams
+    intent_sametraj: bool = False   # Whether to force intent goals in same trajectory
 
-    @staticmethod
-    def get_default_config():
-        return ml_collections.ConfigDict({
-            'p_randomgoal': 0.3,
-            'p_trajgoal': 0.5,
-            'p_currgoal': 0.2,
-            'reward_scale': 1.0,
-            'reward_shift': -1.0,
-            'terminal': True,
-            'p_samegoal': 0.5,
-            'intent_sametraj': False,
-            'max_distance': ml_collections.config_dict.placeholder(int),
-            'curr_goal_shift': 0,
-        })
-
-    def sample(self, batch_size: int, indx=None):
+    def sample(self, batch_size: int, 
+              indx: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+        """
+        Sample batch with dual goal conditioning:
+        - goals: primary goals for policy optimization
+        - desired_goals: secondary goals for skill conditioning
+        """
         if indx is None:
-            indx = np.random.randint(self.dataset.size-1, size=batch_size)
+            indx = torch.randint(
+                0, len(self.dataset['observations']) - 1,
+                (batch_size,), device='cpu'
+            ).to(self.dataset['observations'].device)
         
-        batch = self.dataset.sample(batch_size, indx)
+        # Base transition sampling
+        batch = {k: v[indx] for k, v in self.dataset.items()}
+        
+        # Sample desired goals (intent goals)
         if self.intent_sametraj:
-            desired_goal_indx = self.sample_goals(indx, p_randomgoal=0.0, p_trajgoal=1.0 - self.p_currgoal, p_currgoal=self.p_currgoal)
+            desired_goal_indx = self.sample_goals(
+                indx, p_randomgoal=0.0, 
+                p_trajgoal=1.0 - self.p_currgoal,
+                p_currgoal=self.p_currgoal
+            )
         else:
             desired_goal_indx = self.sample_goals(indx)
         
+        # Sample primary goals with possible sharing
         goal_indx = self.sample_goals(indx)
-        goal_indx = np.where(np.random.rand(batch_size) < self.p_samegoal, desired_goal_indx, goal_indx)
-
-        success = (indx == goal_indx)
-        desired_success = (indx == desired_goal_indx)
-
-        batch['rewards'] = success.astype(float) * self.reward_scale + self.reward_shift
-        batch['desired_rewards'] = desired_success.astype(float) * self.reward_scale + self.reward_shift
+        same_mask = torch.rand(batch_size, device=indx.device) < self.p_samegoal
+        goal_indx = torch.where(same_mask, desired_goal_indx, goal_indx)
         
-        if self.terminal:
-            batch['masks'] = (1.0 - success.astype(float))
-            batch['desired_masks'] = (1.0 - desired_success.astype(float))
+        # Calculate success metrics
+        success = (indx == goal_indx).float()
+        desired_success = (indx == desired_goal_indx).float()
         
-        else:
-            batch['masks'] = np.ones(batch_size)
-            batch['desired_masks'] = np.ones(batch_size)
+        # Update rewards and masks for both goal types
+        batch['rewards'] = success * self.reward_scale + self.reward_shift
+        batch['desired_rewards'] = desired_success * self.reward_scale + self.reward_shift
         
-        goal_indx = np.clip(goal_indx + self.curr_goal_shift, 0, self.dataset.size-1)
-        desired_goal_indx = np.clip(desired_goal_indx + self.curr_goal_shift, 0, self.dataset.size-1)
-        batch['goals'] = jax.tree_map(lambda arr: arr[goal_indx], self.dataset['observations'])
-        batch['desired_goals'] = jax.tree_map(lambda arr: arr[desired_goal_indx], self.dataset['observations'])
-
+        batch['masks'] = 1.0 - success if self.terminal else torch.ones_like(success)
+        batch['desired_masks'] = 1.0 - desired_success if self.terminal else torch.ones_like(desired_success)
+        
+        # Adjust indices with bounds checking
+        goal_indx = torch.clamp(
+            goal_indx + self.curr_goal_shift,
+            0, len(self.dataset['observations']) - 1
+        )
+        desired_goal_indx = torch.clamp(
+            desired_goal_indx + self.curr_goal_shift,
+            0, len(self.dataset['observations']) - 1
+        )
+        
+        # Add both goal types to batch
+        batch['goals'] = {
+            k: v[goal_indx] for k, v in self.dataset['observations'].items()
+        }
+        batch['desired_goals'] = {
+            k: v[desired_goal_indx] for k, v in self.dataset['observations'].items()
+        }
+        
         return batch
-

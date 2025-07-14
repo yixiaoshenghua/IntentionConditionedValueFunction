@@ -1,27 +1,26 @@
 from typing import Dict
-import jax
 import gym
 import numpy as np
 from collections import defaultdict
 import time
 
 
-def supply_rng(f, rng=jax.random.PRNGKey(0)):
-    """
-    Wrapper that supplies a jax random key to a function (using keyword `seed`).
-    Useful for stochastic policies that require randomness.
+# def supply_rng(f, rng=jax.random.PRNGKey(0)):
+#     """
+#     Wrapper that supplies a jax random key to a function (using keyword `seed`).
+#     Useful for stochastic policies that require randomness.
 
-    Similar to functools.partial(f, seed=seed), but makes sure to use a different
-    key for each new call (to avoid stale rng keys).
+#     Similar to functools.partial(f, seed=seed), but makes sure to use a different
+#     key for each new call (to avoid stale rng keys).
 
-    """
+#     """
 
-    def wrapped(*args, **kwargs):
-        nonlocal rng
-        rng, key = jax.random.split(rng)
-        return f(*args, seed=key, **kwargs)
+#     def wrapped(*args, **kwargs):
+#         nonlocal rng
+#         rng, key = jax.random.split(rng)
+#         return f(*args, seed=key, **kwargs)
 
-    return wrapped
+#     return wrapped
 
 
 def flatten(d, parent_key="", sep="."):

@@ -1,148 +1,199 @@
-from jaxrl_m.typing import *
-from jaxrl_m.networks import MLP, get_latent, default_init, ensemblize
-
-import flax.linen as nn
-import jax.numpy as jnp
+import torch
+import torch.nn as nn
+from typing import Callable, Dict, Optional, Sequence, Tuple, Union
 
 class LayerNormMLP(nn.Module):
-    hidden_dims: Sequence[int]
-    activations: Callable[[jnp.ndarray], jnp.ndarray] = nn.gelu
-    activate_final: bool = False
-    kernel_init: Callable[[PRNGKey, Shape, Dtype], Array] = default_init()
+    """
+    Multi-layer perceptron with Layer Normalization.
+    
+    Args:
+        hidden_dims: List of hidden layer dimensions
+        activations: Activation function (default: GELU)
+        activate_final: Whether to apply activation after last layer
+        kernel_init: Weight initialization method
+    """
+    def __init__(self, 
+                 hidden_dims: Sequence[int],
+                 activations: Callable[[torch.Tensor], torch.Tensor] = nn.GELU(),
+                 activate_final: bool = False,
+                 kernel_init: Optional[Callable] = None):
+        super().__init__()
+        layers = []
+        for i, dim in enumerate(hidden_dims):
+            layers.append(nn.LazyLinear(dim))
+            if i < len(hidden_dims) - 1 or activate_final:
+                layers.append(activations)
+                layers.append(nn.LayerNorm(dim))
+        self.net = nn.Sequential(*layers)
+        
+        # Apply custom initialization if provided
+        if kernel_init:
+            self.apply(lambda m: kernel_init(m) if isinstance(m, nn.Linear) else None)
 
-    @nn.compact
-    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
-        for i, size in enumerate(self.hidden_dims):
-            x = nn.Dense(size, kernel_init=self.kernel_init)(x)
-            if i + 1 < len(self.hidden_dims) or self.activate_final:                
-                x = self.activations(x)
-                x = nn.LayerNorm()(x)
-        return x
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
 
 
 class ICVFWithEncoder(nn.Module):
-    encoder: nn.Module
-    vf: nn.Module
-
-    def get_encoder_latent(self, observations: jnp.ndarray) -> jnp.ndarray:     
-        return get_latent(self.encoder, observations)
+    """
+    Value function wrapper with encoder module
     
-    def get_phi(self, observations: jnp.ndarray) -> jnp.ndarray:
-        latent = get_latent(self.encoder, observations)
+    Args:
+        encoder: Feature extractor module
+        vf: Value function module
+    """
+    def __init__(self, 
+                 encoder: nn.Module, 
+                 vf: nn.Module):
+        super().__init__()
+        self.encoder = encoder
+        self.vf = vf
+
+    def get_encoder_latent(self, observations: torch.Tensor) -> torch.Tensor:
+        return self._get_latent(observations)
+    
+    def get_phi(self, observations: torch.Tensor) -> torch.Tensor:
+        latent = self._get_latent(observations)
         return self.vf.get_phi(latent)
 
-    def __call__(self, observations, outcomes, intents):
-        latent_s = get_latent(self.encoder, observations)
-        latent_g = get_latent(self.encoder, outcomes)
-        latent_z = get_latent(self.encoder, intents)
+    def forward(self, 
+                observations: torch.Tensor,
+                outcomes: torch.Tensor,
+                intents: torch.Tensor) -> torch.Tensor:
+        latent_s = self._get_latent(observations)
+        latent_g = self._get_latent(outcomes)
+        latent_z = self._get_latent(intents)
         return self.vf(latent_s, latent_g, latent_z)
     
-    def get_info(self, observations, outcomes, intents):
-        latent_s = get_latent(self.encoder, observations)
-        latent_g = get_latent(self.encoder, outcomes)
-        latent_z = get_latent(self.encoder, intents)
+    def get_info(self, 
+                 observations: torch.Tensor,
+                 outcomes: torch.Tensor,
+                 intents: torch.Tensor) -> Dict[str, torch.Tensor]:
+        latent_s = self._get_latent(observations)
+        latent_g = self._get_latent(outcomes)
+        latent_z = self._get_latent(intents)
         return self.vf.get_info(latent_s, latent_g, latent_z)
-
-def create_icvf(icvf_cls_or_name, encoder=None, ensemble=True, **kwargs):    
-    if isinstance(icvf_cls_or_name, str):
-        icvf_cls = icvfs[icvf_cls_or_name]
-    else:
-        icvf_cls = icvf_cls_or_name
-
-    if ensemble:
-        vf = ensemblize(icvf_cls, 2, methods=['__call__', 'get_info', 'get_phi'])(**kwargs)
-    else:
-        vf = icvf_cls(**kwargs)
     
-    if encoder is None:
-        return vf
+    def _get_latent(self, x: Union[torch.Tensor, Dict]) -> torch.Tensor:
+        """Unified feature extraction method"""
+        if isinstance(x, dict):
+            image_latent = self.encoder(x["image"])
+            state_latent = x["state"]
+            return torch.cat([image_latent, state_latent], dim=-1)
+        return self.encoder(x)
 
-    return ICVFWithEncoder(encoder, vf)
-
-
-
-##
-#
-# Actual ICVF definitions below
-##
 
 class ICVFTemplate(nn.Module):
-
-    def get_info(self, observations: jnp.ndarray, outcomes: jnp.ndarray, z: jnp.ndarray) -> Dict[str, jnp.ndarray]:
-        # Returns useful metrics
+    """Base class for Implicit Cross Entropy Value Functions"""
+    def get_info(self, 
+                 observations: torch.Tensor,
+                 outcomes: torch.Tensor,
+                 intents: torch.Tensor) -> Dict[str, torch.Tensor]:
         raise NotImplementedError
     
-    def get_phi(self, observations):
-        # Returns phi(s) for downstream use
+    def get_phi(self, observations: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
     
-    def __call__(self, observations: jnp.ndarray, outcomes: jnp.ndarray, z: jnp.ndarray) -> jnp.ndarray:
-        # Returns V(s, g, z)
+    def forward(self,
+                observations: torch.Tensor,
+                outcomes: torch.Tensor,
+                intents: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
 
-class MonolithicVF(nn.Module):
-    hidden_dims: Sequence[int]
-    use_layer_norm: bool = False
 
-    def setup(self):
-        network_cls = LayerNormMLP if self.use_layer_norm else MLP
-        self.net = network_cls((*self.hidden_dims, 1), activate_final=False)
-
-    def get_info(self, observations: jnp.ndarray, outcomes: jnp.ndarray, z: jnp.ndarray) -> Dict[str, jnp.ndarray]:
-        x = jnp.concatenate([observations, outcomes, z], axis=-1)
-        v = self.net(x)
-        return {
-            'v': jnp.squeeze(v, -1),
-            'psi': outcomes,
-            'z': z,
-            'phi': observations,
-        }
+class MonolithicVF(ICVFTemplate):
+    """
+    Single neural network value function implementation
     
-    def get_phi(self, observations):
-        print('Warning: StandardVF does not define a state representation phi(s). Returning phi(s) = s')
+    Args:
+        hidden_dims: List of hidden layer dimensions
+        use_layer_norm: Whether to use layer normalization
+    """
+    def __init__(self,
+                 hidden_dims: Sequence[int],
+                 use_layer_norm: bool = False):
+        super().__init__()
+        network_cls = LayerNormMLP if use_layer_norm else nn.LazyLinear
+        self.net = network_cls(hidden_dims + [1])
+        self.repr_warning = True
+
+    def get_info(self, 
+                 observations: torch.Tensor,
+                 outcomes: torch.Tensor,
+                 intents: torch.Tensor) -> Dict[str, torch.Tensor]:
+        x = torch.cat([observations, outcomes, intents], dim=-1)
+        v = self.net(x).squeeze(-1)
+        return {'v': v, 'psi': outcomes, 'z': intents, 'phi': observations}
+    
+    def get_phi(self, observations: torch.Tensor) -> torch.Tensor:
+        if self.repr_warning:
+            print('Warning: StandardVF returns raw states as representations')
+            self.repr_warning = False
         return observations
     
-    def __call__(self, observations: jnp.ndarray, outcomes: jnp.ndarray, z: jnp.ndarray) -> jnp.ndarray:
-        x = jnp.concatenate([observations, outcomes, z], axis=-1)
-        v = self.net(x)
-        return jnp.squeeze(v, -1)
+    def forward(self,
+                observations: torch.Tensor,
+                outcomes: torch.Tensor,
+                intents: torch.Tensor) -> torch.Tensor:
+        x = torch.cat([observations, outcomes, intents], dim=-1)
+        return self.net(x).squeeze(-1)
 
-class MultilinearVF(nn.Module):
-    hidden_dims: Sequence[int]
-    use_layer_norm: bool = False
 
-    def setup(self):
-        network_cls = LayerNormMLP if self.use_layer_norm else MLP
-        self.phi_net = network_cls(self.hidden_dims, activate_final=True, name='phi')
-        self.psi_net = network_cls(self.hidden_dims, activate_final=True, name='psi')
-
-        self.T_net =  network_cls(self.hidden_dims, activate_final=True, name='T')
-
-        self.matrix_a = nn.Dense(self.hidden_dims[-1], name='matrix_a')
-        self.matrix_b = nn.Dense(self.hidden_dims[-1], name='matrix_b')
-        
+class MultilinearVF(ICVFTemplate):
+    """
+    Factorized value function with tensor decomposition
     
-    def __call__(self, observations: jnp.ndarray, outcomes: jnp.ndarray, intents: jnp.ndarray) -> jnp.ndarray:
-        return self.get_info(observations, outcomes, intents)['v']
+    Args:
+        hidden_dims: List of hidden layer dimensions
+        use_layer_norm: Whether to use layer normalization
+    """
+    def __init__(self,
+                 hidden_dims: Sequence[int],
+                 use_layer_norm: bool = False):
+        super().__init__()
+        network_cls = LayerNormMLP if use_layer_norm else nn.Sequential
         
+        # State representation network
+        self.phi_net = network_cls(
+            nn.LazyLinear(hidden_dims[-1]),
+            nn.GELU() if use_layer_norm else None
+        )
+        
+        # Outcome representation network
+        self.psi_net = network_cls(
+            nn.LazyLinear(hidden_dims[-1]),
+            nn.GELU() if use_layer_norm else None
+        )
+        
+        # Intent transformation network
+        self.T_net = network_cls(
+            nn.LazyLinear(hidden_dims[-1]),
+            nn.GELU() if use_layer_norm else None
+        )
+        
+        # Intent-conditioned projection matrices
+        self.matrix_a = nn.LazyLinear(hidden_dims[-1])
+        self.matrix_b = nn.LazyLinear(hidden_dims[-1])
 
-    def get_phi(self, observations):
+    def get_phi(self, observations: torch.Tensor) -> torch.Tensor:
         return self.phi_net(observations)
 
-    def get_info(self, observations: jnp.ndarray, outcomes: jnp.ndarray, intents: jnp.ndarray) -> Dict[str, jnp.ndarray]:
+    def get_info(self,
+                 observations: torch.Tensor,
+                 outcomes: torch.Tensor,
+                 intents: torch.Tensor) -> Dict[str, torch.Tensor]:
         phi = self.phi_net(observations)
         psi = self.psi_net(outcomes)
         z = self.psi_net(intents)
         Tz = self.T_net(z)
-
-        # T(z) should be a dxd matrix, but having a network output d^2 parameters is inefficient
-        # So we'll make a low-rank approximation to T(z) = (diag(Tz) * A * B * diag(Tz))
-        # where A and B are (fixed) dxd matrices and Tz is a d-dimensional parameter dependent on z
-
+        
+        # Low-rank intent-conditioned projections
         phi_z = self.matrix_a(Tz * phi)
         psi_z = self.matrix_b(Tz * psi)
-        v = (phi_z * psi_z).sum(axis=-1)
-
+        
+        # Bilinear value function
+        v = (phi_z * psi_z).sum(dim=-1)
+        
         return {
             'v': v,
             'phi': phi,
@@ -150,10 +201,85 @@ class MultilinearVF(nn.Module):
             'Tz': Tz,
             'z': z,
             'phi_z': phi_z,
-            'psi_z': psi_z,
+            'psi_z': psi_z
         }
+    
+    def forward(self,
+                observations: torch.Tensor,
+                outcomes: torch.Tensor,
+                intents: torch.Tensor) -> torch.Tensor:
+        return self.get_info(observations, outcomes, intents)['v']
 
-icvfs = {
+
+# ICVF type registry
+ICVF_REGISTRY = {
     'multilinear': MultilinearVF,
-    'monolithic': MonolithicVF,
+    'monolithic': MonolithicVF
 }
+
+def create_icvf(icvf_type: Union[str, ICVFTemplate],
+               encoder: Optional[nn.Module] = None,
+               ensemble: bool = True,
+               **kwargs) -> nn.Module:
+    """
+    Create ICVF model with optional encoder and ensemble
+    
+    Args:
+        icvf_type: ICVF type name or class
+        encoder: Optional feature encoder module
+        ensemble: Whether to create ensemble of value functions
+        **kwargs: Constructor arguments for ICVF
+    """
+    # Resolve ICVF type
+    if isinstance(icvf_type, str):
+        icvf_cls = ICVF_REGISTRY[icvf_type]
+    else:
+        icvf_cls = icvf_type
+    
+    # Create value function (single or ensemble)
+    if ensemble:
+        vf = EnsembleICVF(icvf_cls, 2, **kwargs)
+    else:
+        vf = icvf_cls(**kwargs)
+    
+    # Add encoder wrapper if needed
+    if encoder:
+        return ICVFWithEncoder(encoder, vf)
+    return vf
+
+
+class EnsembleICVF(nn.Module):
+    """
+    Ensemble of ICVF models for uncertainty estimation
+    
+    Args:
+        model_cls: ICVF model class
+        num_models: Number of ensemble members
+        **kwargs: Constructor arguments for ICVF
+    """
+    def __init__(self, 
+                 model_cls: ICVFTemplate, 
+                 num_models: int,
+                 **kwargs):
+        super().__init__()
+        self.models = nn.ModuleList([model_cls(**kwargs) for _ in range(num_models)])
+    
+    def forward(self,
+                observations: torch.Tensor,
+                outcomes: torch.Tensor,
+                intents: torch.Tensor) -> torch.Tensor:
+        outputs = [model(observations, outcomes, intents) for model in self.models]
+        return torch.stack(outputs, dim=0)  # [ensemble, batch]
+    
+    def get_info(self,
+                 observations: torch.Tensor,
+                 outcomes: torch.Tensor,
+                 intents: torch.Tensor) -> Dict[str, torch.Tensor]:
+        infos = [model.get_info(observations, outcomes, intents) for model in self.models]
+        
+        # Stack all outputs from ensemble
+        return {k: torch.stack([info[k] for info in infos], dim=0) for k in infos[0]}
+    
+    def get_phi(self, observations: torch.Tensor) -> torch.Tensor:
+        phis = [model.get_phi(observations) for model in self.models]
+        return torch.stack(phis, dim=0)  # [ensemble, batch, features]

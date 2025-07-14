@@ -2,8 +2,8 @@ import d4rl
 import gym
 import numpy as np
 
-from jaxrl_m.dataset import Dataset
-from jaxrl_m.evaluation import EpisodeMonitor
+from rl_utils.dataset import Dataset
+from rl_utils.evaluation import EpisodeMonitor
 
 def make_env(env_name: str):
     env = gym.make(env_name)
